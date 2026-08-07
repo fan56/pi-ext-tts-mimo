@@ -10,7 +10,7 @@
 - 支持自定义朗读风格
 - 自动朗读 agent 回答
 - 内容过滤：自动跳过代码块、命令输出、文件路径清单、表格等不适合朗读的内容（/tts 菜单可开关）
-- 长回复总结：超过 500 字时用 LLM 总结成 1-3 句话朗读（/tts 菜单可开关，阈值可改 config.json 的 summarizeThreshold）
+- 长回复总结：超过阈值时用 LLM 总结成 1-3 句话朗读（/tts 菜单可开关、切换阈值/总结模型/思考深度）
 - 状态持久化（开关、模型、音色、风格）
 
 ## 命令
@@ -21,6 +21,10 @@
   - 选择音色（支持预览）
   - 设置风格
   - 内容过滤开关
+  - LLM 总结开关
+  - 总结阈值（300/500/800/1000 字循环切换）
+  - 总结模型（mimo-v2.5-pro / qwen3.6-flash / deepseek-v4-flash 循环切换）
+  - 思考深度（off / low / medium / high 循环切换）
 
 ## 模型列表
 
@@ -87,9 +91,20 @@ Extension 从 `~/.pi/agent/auth.json` 读取 MiMo API key。
   "enabled": false,
   "model": "mimo-v2.5-tts",
   "voice": "冰糖",
-  "style": "用自然流畅的语气说"
+  "style": "用自然流畅的语气说",
+  "filterEnabled": true,
+  "summarizeEnabled": true,
+  "summarizeThreshold": 500,
+  "summarizeModel": "mimo-v2.5-pro",
+  "summarizeThinkLevel": "medium"
 }
 ```
+
+LLM 总结相关配置说明：
+
+- `summarizeThreshold`：超过该字符数才触发总结，可选 300 / 500 / 800 / 1000（默认 500）
+- `summarizeModel`：总结用模型，可选 `mimo-v2.5-pro` / `qwen3.6-flash` / `deepseek-v4-flash`（默认 mimo-v2.5-pro）。`qwen3.6-flash` 使用百炼 `bailian-tp` 的 key，`deepseek-v4-flash` 使用 `deepseek` 的 key；对应 key 缺失时自动降级回 mimo-v2.5-pro
+- `summarizeThinkLevel`：思考深度，可选 `off` / `low` / `medium` / `high`（默认 medium，与不传 thinking 参数时的默认行为一致）
 
 ## 使用方法
 

@@ -63,6 +63,7 @@ interface TTSState {
   summarizeEnabled: boolean;   // LLM 总结开关
   summarizeThreshold: number;  // 触发阈值（字符数）
   summarizeModel: string;      // 文本总结模型
+  summarizeThinkLevel: string; // 思考深度: off | low | medium | high
 }
 
 // 默认状态
@@ -75,6 +76,7 @@ const DEFAULT_STATE: TTSState = {
   summarizeEnabled: true,
   summarizeThreshold: 500,
   summarizeModel: "mimo-v2.5-pro",
+  summarizeThinkLevel: "medium", // 默认与现状一致：MiMo 不传 thinking 时思考开启
 };
 
 // 配置文件路径
@@ -127,6 +129,7 @@ function loadState(): void {
       state.summarizeEnabled = data.summarizeEnabled ?? DEFAULT_STATE.summarizeEnabled;
       state.summarizeThreshold = data.summarizeThreshold ?? DEFAULT_STATE.summarizeThreshold;
       state.summarizeModel = data.summarizeModel ?? DEFAULT_STATE.summarizeModel;
+      state.summarizeThinkLevel = data.summarizeThinkLevel ?? DEFAULT_STATE.summarizeThinkLevel;
     }
   } catch (error) {
     console.error("Failed to load config:", error);
@@ -305,35 +308,85 @@ const FILTER_SUMMARY_PROMPT = `你是语音播报摘要器。下面是一段 AI 
 - 突出核心结论，省略细节、代码、路径、命令等不适合朗读的内容
 - 不超过 3 句`;
 
+/** 从 auth.json 读取指定 provider 的 key（支持多个备选，依次取第一个非空） */
+function getProviderKey(provider: string | string[]): string {
+  try {
+    if (existsSync(AUTH_FILE)) {
+      const auth = JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
+      const providers = Array.isArray(provider) ? provider : [provider];
+      for (const p of providers) {
+        if (auth[p]?.key) return auth[p].key;
+      }
+    }
+  } catch (error) {
+    console.error("Failed to read auth.json:", error);
+  }
+  return "";
+}
+
+// 总结模型 → API 端点 + auth key provider 映射（key 缺失时降级回 mimo-v2.5-pro）
+const SUMMARY_MODEL_CONFIGS: Record<string, { baseUrl: string; keyProviders: string[] }> = {
+  "mimo-v2.5-pro": {
+    baseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
+    keyProviders: ["Mimo", "xiaomi-token-plan-cn"],
+  },
+  "qwen3.6-flash": {
+    baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    keyProviders: ["bailian-tp"],
+  },
+  "deepseek-v4-flash": {
+    baseUrl: "https://api.deepseek.com",
+    keyProviders: ["deepseek"],
+  },
+};
+
 /**
  * 用 LLM 把长文本总结成 1-3 句口语化摘要（失败返回 null，由调用方降级）
  */
 async function summarizeWithLLM(text: string): Promise<string | null> {
-  const apiKey = getApiKey();
+  // 按所选总结模型解析 API 端点与 key；模型未知或 key 缺失时降级回默认模型
+  let model = state.summarizeModel;
+  let config = SUMMARY_MODEL_CONFIGS[model];
+  let apiKey = config ? getProviderKey(config.keyProviders) : "";
+  if (!config || !apiKey) {
+    model = "mimo-v2.5-pro";
+    config = SUMMARY_MODEL_CONFIGS[model];
+    apiKey = getProviderKey(config.keyProviders);
+  }
   if (!apiKey) return null;
 
   // 输入截断：保护 token
   const truncatedInput = text.length > 8000 ? text.substring(0, 8000) + "\n\n[内容过长，已截断]" : text;
 
+  const body: Record<string, unknown> = {
+    model,
+    messages: [
+      { role: "system", content: FILTER_SUMMARY_PROMPT },
+      { role: "user", content: truncatedInput },
+    ],
+    max_tokens: 300,
+    temperature: 0.3,
+  };
+  // think level：off → thinking disabled；low/medium/high → thinking enabled + 顶层 reasoning_effort
+  const level = state.summarizeThinkLevel;
+  if (level === "off") {
+    body.thinking = { type: "disabled" };
+  } else if (level === "low" || level === "medium" || level === "high") {
+    body.thinking = { type: "enabled" };
+    body.reasoning_effort = level;
+  }
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
 
-    const response = await fetch(`${MIMO_API_BASE}/chat/completions`, {
+    const response = await fetch(`${config.baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: state.summarizeModel,   // "mimo-v2.5-pro"
-        messages: [
-          { role: "system", content: FILTER_SUMMARY_PROMPT },
-          { role: "user", content: truncatedInput },
-        ],
-        max_tokens: 300,
-        temperature: 0.3,
-      }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
     clearTimeout(timeout);
@@ -445,6 +498,9 @@ export default function (pi: ExtensionAPI) {
         `设置风格: ${state.style}`,
         `内容过滤: ${state.filterEnabled ? "已开启 ✓" : "已关闭"}`,
         `LLM 总结: ${state.summarizeEnabled ? "已开启 ✓" : "已关闭"}`,
+        `总结阈值: ${state.summarizeThreshold} 字`,
+        `总结模型: ${state.summarizeModel}`,
+        `思考深度: ${state.summarizeThinkLevel}`,
       ];
       
       // 弹窗选择
@@ -484,6 +540,30 @@ export default function (pi: ExtensionAPI) {
           saveState();
           ctx.ui.notify(`LLM 总结 ${state.summarizeEnabled ? "已开启" : "已关闭"}`, "info");
           break;
+
+        case 6: { // 总结阈值（循环切换 300/500/800/1000）
+          const thresholds = [300, 500, 800, 1000];
+          state.summarizeThreshold = thresholds[(thresholds.indexOf(state.summarizeThreshold) + 1) % thresholds.length];
+          saveState();
+          ctx.ui.notify(`总结阈值: ${state.summarizeThreshold} 字`, "info");
+          break;
+        }
+
+        case 7: { // 总结模型（循环切换）
+          const summarizeModels = ["mimo-v2.5-pro", "qwen3.6-flash", "deepseek-v4-flash"];
+          state.summarizeModel = summarizeModels[(summarizeModels.indexOf(state.summarizeModel) + 1) % summarizeModels.length];
+          saveState();
+          ctx.ui.notify(`总结模型: ${state.summarizeModel}`, "info");
+          break;
+        }
+
+        case 8: { // 思考深度（循环切换 off/low/medium/high）
+          const thinkLevels = ["off", "low", "medium", "high"];
+          state.summarizeThinkLevel = thinkLevels[(thinkLevels.indexOf(state.summarizeThinkLevel) + 1) % thinkLevels.length];
+          saveState();
+          ctx.ui.notify(`思考深度: ${state.summarizeThinkLevel}`, "info");
+          break;
+        }
       }
     },
   });
