@@ -332,6 +332,109 @@ function resolveSummarizeModel(ctx: any, key: string): any {
   return models.find((m: any) => m.id === key) || null;
 }
 
+const VISIBLE_MODELS = 10;
+
+// 自绘滚动+过滤模型选择器（参考 pi-model-favorites 的窗口滚动 + / 过滤）
+// 返回选中的模型对象，取消返回 null
+function pickSummarizeModel(ctx: any, models: any[], currentKey: string | undefined): Promise<any | null> {
+  const sorted = [...models].sort((a: any, b: any) =>
+    a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name)
+  );
+
+  return ctx.ui.custom<any | null>((tui: any, theme: any, _keybindings: any, done: (v: any | null) => void) => {
+    let filter = "";
+    let filtering = false;
+    let cursor = 0;
+    let scroll = 0;
+    let version = 0;
+    let cached: { version: number; width: number; lines: string[] } | undefined;
+
+    const matches = (m: any): boolean => {
+      if (filter === "") return true;
+      const q = filter.toLowerCase();
+      return (
+        m.name.toLowerCase().includes(q) ||
+        m.id.toLowerCase().includes(q) ||
+        m.provider.toLowerCase().includes(q)
+      );
+    };
+    const visible = (): any[] => sorted.filter(matches);
+    const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(v, hi));
+
+    const rebuild = (): void => {
+      const list = visible();
+      if (list.length === 0) { cursor = 0; scroll = 0; return; }
+      cursor = clamp(cursor, 0, list.length - 1);
+      scroll = clamp(scroll, 0, Math.max(0, list.length - VISIBLE_MODELS));
+      if (cursor < scroll) scroll = cursor;
+      else if (cursor >= scroll + VISIBLE_MODELS) scroll = cursor - VISIBLE_MODELS + 1;
+    };
+    const move = (delta: number): void => {
+      const list = visible();
+      if (list.length === 0) return;
+      cursor = clamp(cursor + delta, 0, list.length - 1);
+      if (cursor < scroll) scroll = cursor;
+      else if (cursor >= scroll + VISIBLE_MODELS) scroll = cursor - VISIBLE_MODELS + 1;
+    };
+
+    rebuild();
+
+    const render = (width: number): string[] => {
+      if (cached && cached.version === version && cached.width === width) return cached.lines;
+      const list = visible();
+      const lines: string[] = [theme.fg("accent", theme.bold("选择总结模型"))];
+      if (list.length === 0) {
+        lines.push(theme.fg("dim", "  (no models match)"));
+      } else {
+        if (scroll > 0) lines.push(theme.fg("dim", "  ▲"));
+        for (let i = scroll; i < Math.min(list.length, scroll + VISIBLE_MODELS); i++) {
+          const m = list[i];
+          const key = `${m.provider}/${m.id}`;
+          const text = `${m.name} (${m.provider})${key === currentKey ? " ✓" : ""}`;
+          if (i === cursor) lines.push(theme.bg("selectedBg", theme.fg("accent", `▸ ${text}`)));
+          else lines.push(`  ${text}`);
+        }
+        if (scroll + VISIBLE_MODELS < list.length) lines.push(theme.fg("dim", "  ▼"));
+      }
+      if (filtering) {
+        lines.push(theme.fg("accent", `filter: "${filter}"`) + theme.fg("dim", " • enter apply • esc clear"));
+      } else {
+        lines.push(theme.fg("dim", "↑↓ nav • enter select • / filter • esc cancel"));
+      }
+      cached = { version, width, lines };
+      return lines;
+    };
+
+    const handleInput = (data: string): void => {
+      if (filtering) {
+        if (matchesKey(data, Key.escape)) { filter = ""; filtering = false; }
+        else if (matchesKey(data, Key.enter)) { filtering = false; }
+        else if (matchesKey(data, Key.backspace)) { filter = filter.slice(0, -1); }
+        else if (data.length === 1 && data >= " ") { filter += data; }
+        else return;
+        rebuild();
+        version++;
+        tui.requestRender();
+        return;
+      }
+      if (data === "/") { filtering = true; version++; tui.requestRender(); return; }
+      if (matchesKey(data, Key.up)) move(-1);
+      else if (matchesKey(data, Key.down)) move(1);
+      else if (matchesKey(data, Key.enter)) {
+        const list = visible();
+        const m = list[cursor];
+        if (m) done(m);
+        return;
+      } else if (matchesKey(data, Key.escape)) { done(null); return; }
+      else return;
+      version++;
+      tui.requestRender();
+    };
+
+    return { render, invalidate: () => { cached = undefined; }, handleInput };
+  });
+}
+
 /**
  * 用 LLM 把长文本总结成 1-3 句口语化摘要（失败返回 null，由调用方降级）
  * 模型取自 pi 模型注册表，auth/协议/thinking 格式由 complete() 自动处理
@@ -522,22 +625,19 @@ export default function (pi: ExtensionAPI) {
           break;
         }
 
-        case 7: { // 总结模型（二级弹窗选择，从 pi 已配置模型列表选取）
+        case 7: { // 总结模型（自绘滚动选择器，从 pi 已配置模型列表选取，支持 / 过滤）
           const models = getSummarizeModels(ctx);
           if (models.length === 0) {
             ctx.ui.notify("没有可用的文本模型", "error");
             break;
           }
           const current = resolveSummarizeModel(ctx, state.summarizeModel);
-          const summarizeModelOptions = models.map((m: any) =>
-            `${m.id} (${m.provider})${current && current.id === m.id && current.provider === m.provider ? " ✓" : ""}`
-          );
-          const chosen = await ctx.ui.select("选择总结模型:", summarizeModelOptions);
-          const idx = summarizeModelOptions.indexOf(chosen);
-          if (idx >= 0) {
-            state.summarizeModel = summarizeModelKey(models[idx]);
+          const currentKey = current ? `${current.provider}/${current.id}` : undefined;
+          const chosen = await pickSummarizeModel(ctx, models, currentKey);
+          if (chosen) {
+            state.summarizeModel = summarizeModelKey(chosen);
             saveState();
-            ctx.ui.notify(`总结模型: ${models[idx].id} (${models[idx].provider})`, "info");
+            ctx.ui.notify(`总结模型: ${chosen.id} (${chosen.provider})`, "info");
           }
           break;
         }
