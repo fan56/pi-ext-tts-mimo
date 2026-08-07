@@ -75,7 +75,7 @@ const DEFAULT_STATE: TTSState = {
   filterEnabled: true,
   summarizeEnabled: true,
   summarizeThreshold: 500,
-  summarizeModel: "mimo-v2.5-pro",
+  summarizeModel: "xiaomi-token-plan-cn/mimo-v2-pro",
   summarizeThinkLevel: "medium", // 默认与现状一致：MiMo 不传 thinking 时思考开启
 };
 
@@ -308,94 +308,66 @@ const FILTER_SUMMARY_PROMPT = `你是语音播报摘要器。下面是一段 AI 
 - 突出核心结论，省略细节、代码、路径、命令等不适合朗读的内容
 - 不超过 3 句`;
 
-/** 从 auth.json 读取指定 provider 的 key（支持多个备选，依次取第一个非空） */
-function getProviderKey(provider: string | string[]): string {
-  try {
-    if (existsSync(AUTH_FILE)) {
-      const auth = JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
-      const providers = Array.isArray(provider) ? provider : [provider];
-      for (const p of providers) {
-        if (auth[p]?.key) return auth[p].key;
-      }
-    }
-  } catch (error) {
-    console.error("Failed to read auth.json:", error);
-  }
-  return "";
+/** 从 pi 模型注册表获取可用的文本模型列表（有 auth 配置的优先，否则全部） */
+function getSummarizeModels(ctx: any): any[] {
+  const reg = ctx?.modelRegistry;
+  if (!reg) return [];
+  const list = reg.getAvailable().length > 0 ? reg.getAvailable() : reg.getAll();
+  return (list || []).filter((m: any) => m?.input?.includes("text"));
 }
 
-// 总结模型 → API 端点 + auth key provider 映射（key 缺失时降级回 mimo-v2.5-pro）
-const SUMMARY_MODEL_CONFIGS: Record<string, { baseUrl: string; keyProviders: string[] }> = {
-  "mimo-v2.5-pro": {
-    baseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
-    keyProviders: ["Mimo", "xiaomi-token-plan-cn"],
-  },
-  "qwen3.6-flash": {
-    baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-    keyProviders: ["bailian-tp"],
-  },
-  "deepseek-v4-flash": {
-    baseUrl: "https://api.deepseek.com",
-    keyProviders: ["deepseek"],
-  },
-};
+/** 模型 → "provider/id" 唯一键 */
+function summarizeModelKey(model: any): string {
+  return `${model.provider}/${model.id}`;
+}
+
+/** 按 key 解析注册表中的模型；key 不含 "/" 时按裸 id 兼容旧配置 */
+function resolveSummarizeModel(ctx: any, key: string): any {
+  if (!key) return null;
+  const models = getSummarizeModels(ctx);
+  if (key.includes("/")) {
+    const [provider, id] = key.split("/");
+    return models.find((m: any) => m.provider === provider && m.id === id) || null;
+  }
+  return models.find((m: any) => m.id === key) || null;
+}
 
 /**
  * 用 LLM 把长文本总结成 1-3 句口语化摘要（失败返回 null，由调用方降级）
+ * 模型取自 pi 模型注册表，auth/协议/thinking 格式由 complete() 自动处理
  */
-async function summarizeWithLLM(text: string): Promise<string | null> {
-  // 按所选总结模型解析 API 端点与 key；模型未知或 key 缺失时降级回默认模型
-  let model = state.summarizeModel;
-  let config = SUMMARY_MODEL_CONFIGS[model];
-  let apiKey = config ? getProviderKey(config.keyProviders) : "";
-  if (!config || !apiKey) {
-    model = "mimo-v2.5-pro";
-    config = SUMMARY_MODEL_CONFIGS[model];
-    apiKey = getProviderKey(config.keyProviders);
-  }
-  if (!apiKey) return null;
+async function summarizeWithLLM(ctx: any, text: string): Promise<string | null> {
+  const model = resolveSummarizeModel(ctx, state.summarizeModel);
+  if (!model) return null;
 
   // 输入截断：保护 token
   const truncatedInput = text.length > 8000 ? text.substring(0, 8000) + "\n\n[内容过长，已截断]" : text;
 
-  const body: Record<string, unknown> = {
-    model,
-    messages: [
-      { role: "system", content: FILTER_SUMMARY_PROMPT },
-      { role: "user", content: truncatedInput },
-    ],
-    max_tokens: 300,
-    temperature: 0.3,
-  };
-  // think level：off → thinking disabled；low/medium/high → thinking enabled + 顶层 reasoning_effort
-  const level = state.summarizeThinkLevel;
-  if (level === "off") {
-    body.thinking = { type: "disabled" };
-  } else if (level === "low" || level === "medium" || level === "high") {
-    body.thinking = { type: "enabled" };
-    body.reasoning_effort = level;
-  }
-
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-
-    const response = await fetch(`${config.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
+    const msg = await ctx.modelRegistry.complete(
+      model,
+      {
+        systemPrompt: FILTER_SUMMARY_PROMPT,
+        messages: [{ role: "user", content: truncatedInput }],
       },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
+      {
+        reasoning: state.summarizeThinkLevel as any,
+        temperature: 0.3,
+        maxTokens: 300,
+        timeoutMs: 10000,
+      },
+    );
 
-    if (!response.ok) return null;
-    const data = (await response.json()) as any;
-    const content = data?.choices?.[0]?.message?.content;
-    if (typeof content !== "string" || !content.trim()) return null;
-    return content.trim();
+    const content = msg?.content;
+    if (Array.isArray(content)) {
+      const result = content
+        .filter((b: any) => b?.type === "text" && typeof b.text === "string")
+        .map((b: any) => b.text)
+        .join("")
+        .trim();
+      if (result) return result;
+    }
+    return null;
   } catch (error) {
     console.error("[tts-mimo] summarize failed:", error);
     return null;
@@ -489,6 +461,7 @@ export default function (pi: ExtensionAPI) {
       
       const currentVoice = VOICES.find((v) => v.id === state.voice);
       const currentModel = MODELS.find((m) => m.id === state.model);
+      const currentSummaryModel = resolveSummarizeModel(ctx, state.summarizeModel);
       
       // 构建菜单选项
       const options = [
@@ -499,7 +472,7 @@ export default function (pi: ExtensionAPI) {
         `内容过滤: ${state.filterEnabled ? "已开启 ✓" : "已关闭"}`,
         `LLM 总结: ${state.summarizeEnabled ? "已开启 ✓" : "已关闭"}`,
         `总结阈值: ${state.summarizeThreshold} 字`,
-        `总结模型: ${state.summarizeModel}`,
+        `总结模型: ${currentSummaryModel ? `${currentSummaryModel.id} (${currentSummaryModel.provider})` : "未配置/无效"}`,
         `思考深度: ${state.summarizeThinkLevel}`,
       ];
       
@@ -549,17 +522,22 @@ export default function (pi: ExtensionAPI) {
           break;
         }
 
-        case 7: { // 总结模型（二级弹窗选择）
-          const summarizeModels = ["mimo-v2.5-pro", "qwen3.6-flash", "deepseek-v4-flash"];
-          const summarizeModelOptions = summarizeModels.map((m) => `${m}${m === state.summarizeModel ? " ✓" : ""}`);
+        case 7: { // 总结模型（二级弹窗选择，从 pi 已配置模型列表选取）
+          const models = getSummarizeModels(ctx);
+          if (models.length === 0) {
+            ctx.ui.notify("没有可用的文本模型", "error");
+            break;
+          }
+          const current = resolveSummarizeModel(ctx, state.summarizeModel);
+          const summarizeModelOptions = models.map((m: any) =>
+            `${m.id} (${m.provider})${current && current.id === m.id && current.provider === m.provider ? " ✓" : ""}`
+          );
           const chosen = await ctx.ui.select("选择总结模型:", summarizeModelOptions);
-          if (chosen) {
-            const idx = summarizeModelOptions.indexOf(chosen);
-            if (idx >= 0) {
-              state.summarizeModel = summarizeModels[idx];
-              saveState();
-              ctx.ui.notify(`总结模型: ${state.summarizeModel}`, "info");
-            }
+          const idx = summarizeModelOptions.indexOf(chosen);
+          if (idx >= 0) {
+            state.summarizeModel = summarizeModelKey(models[idx]);
+            saveState();
+            ctx.ui.notify(`总结模型: ${models[idx].id} (${models[idx].provider})`, "info");
           }
           break;
         }
@@ -697,7 +675,7 @@ export default function (pi: ExtensionAPI) {
     let speechText: string;
     if (text.length > state.summarizeThreshold) {
       if (state.summarizeEnabled) {
-        const summary = await summarizeWithLLM(text);
+        const summary = await summarizeWithLLM(ctx, text);
         if (summary) {
           speechText = summary;
         } else {

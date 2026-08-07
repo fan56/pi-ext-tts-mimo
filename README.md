@@ -23,7 +23,7 @@
   - 内容过滤开关
   - LLM 总结开关
   - 总结阈值（300/500/800/1000 字循环切换）
-  - 总结模型（mimo-v2.5-pro / qwen3.6-flash / deepseek-v4-flash 循环切换）
+  - 总结模型（从 pi 已配置模型列表选择，显示 id (provider)）
   - 思考深度（off / low / medium / high 循环切换）
 
 ## 模型列表
@@ -95,7 +95,7 @@ Extension 从 `~/.pi/agent/auth.json` 读取 MiMo API key。
   "filterEnabled": true,
   "summarizeEnabled": true,
   "summarizeThreshold": 500,
-  "summarizeModel": "mimo-v2.5-pro",
+  "summarizeModel": "xiaomi-token-plan-cn/mimo-v2-pro",
   "summarizeThinkLevel": "medium"
 }
 ```
@@ -103,7 +103,7 @@ Extension 从 `~/.pi/agent/auth.json` 读取 MiMo API key。
 LLM 总结相关配置说明：
 
 - `summarizeThreshold`：超过该字符数才触发总结，可选 300 / 500 / 800 / 1000（默认 500）
-- `summarizeModel`：总结用模型，可选 `mimo-v2.5-pro` / `qwen3.6-flash` / `deepseek-v4-flash`（默认 mimo-v2.5-pro）。`qwen3.6-flash` 使用百炼 `bailian-tp` 的 key，`deepseek-v4-flash` 使用 `deepseek` 的 key；对应 key 缺失时自动降级回 mimo-v2.5-pro
+- `summarizeModel`：总结用模型，从 pi 已配置的模型列表中选择（格式 `provider/id`，默认 `xiaomi-token-plan-cn/mimo-v2-pro`）。使用 pi 自身的 auth 配置，无需在扩展中硬编码 key；旧配置的裸 id（如 `deepseek-v4-flash`）仍可兼容解析
 - `summarizeThinkLevel`：思考深度，可选 `off` / `low` / `medium` / `high`（默认 medium，与不传 thinking 参数时的默认行为一致）
 
 ## 使用方法
