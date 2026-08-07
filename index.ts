@@ -642,11 +642,16 @@ export default function (pi: ExtensionAPI) {
           break;
         }
 
-        case 8: { // 思考深度（循环切换 off/low/medium/high）
+        case 8: { // 思考深度（弹窗选择 off/low/medium/high）
           const thinkLevels = ["off", "low", "medium", "high"];
-          state.summarizeThinkLevel = thinkLevels[(thinkLevels.indexOf(state.summarizeThinkLevel) + 1) % thinkLevels.length];
-          saveState();
-          ctx.ui.notify(`思考深度: ${state.summarizeThinkLevel}`, "info");
+          const options = thinkLevels.map((l) => `${l}${l === state.summarizeThinkLevel ? " ✓" : ""}`);
+          const chosen = await ctx.ui.select("选择思考深度:", options);
+          const idx = options.indexOf(chosen);
+          if (idx >= 0) {
+            state.summarizeThinkLevel = thinkLevels[idx];
+            saveState();
+            ctx.ui.notify(`思考深度: ${state.summarizeThinkLevel}`, "info");
+          }
           break;
         }
       }
