@@ -60,6 +60,9 @@ interface TTSState {
   voice: string;
   style: string;
   filterEnabled: boolean;
+  summarizeEnabled: boolean;   // LLM 总结开关
+  summarizeThreshold: number;  // 触发阈值（字符数）
+  summarizeModel: string;      // 文本总结模型
 }
 
 // 默认状态
@@ -69,6 +72,9 @@ const DEFAULT_STATE: TTSState = {
   voice: "冰糖",
   style: "用自然流畅的语气说",
   filterEnabled: true,
+  summarizeEnabled: true,
+  summarizeThreshold: 500,
+  summarizeModel: "mimo-v2.5-pro",
 };
 
 // 配置文件路径
@@ -118,6 +124,9 @@ function loadState(): void {
       state.voice = data.voice ?? DEFAULT_STATE.voice;
       state.style = data.style ?? DEFAULT_STATE.style;
       state.filterEnabled = data.filterEnabled ?? DEFAULT_STATE.filterEnabled;
+      state.summarizeEnabled = data.summarizeEnabled ?? DEFAULT_STATE.summarizeEnabled;
+      state.summarizeThreshold = data.summarizeThreshold ?? DEFAULT_STATE.summarizeThreshold;
+      state.summarizeModel = data.summarizeModel ?? DEFAULT_STATE.summarizeModel;
     }
   } catch (error) {
     console.error("Failed to load config:", error);
@@ -289,6 +298,57 @@ function extractText(content: unknown): string {
     .trim();
 }
 
+const FILTER_SUMMARY_PROMPT = `你是语音播报摘要器。下面是一段 AI 助手给用户的回复，请把它总结成 1-3 句口语化的话，直接告诉用户结果。
+要求：
+- 只输出总结内容本身，不要任何前缀、解释、标注
+- 用自然口语风格，像在跟人说话
+- 突出核心结论，省略细节、代码、路径、命令等不适合朗读的内容
+- 不超过 3 句`;
+
+/**
+ * 用 LLM 把长文本总结成 1-3 句口语化摘要（失败返回 null，由调用方降级）
+ */
+async function summarizeWithLLM(text: string): Promise<string | null> {
+  const apiKey = getApiKey();
+  if (!apiKey) return null;
+
+  // 输入截断：保护 token
+  const truncatedInput = text.length > 8000 ? text.substring(0, 8000) + "\n\n[内容过长，已截断]" : text;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
+    const response = await fetch(`${MIMO_API_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: state.summarizeModel,   // "mimo-v2.5-pro"
+        messages: [
+          { role: "system", content: FILTER_SUMMARY_PROMPT },
+          { role: "user", content: truncatedInput },
+        ],
+        max_tokens: 300,
+        temperature: 0.3,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) return null;
+    const data = (await response.json()) as any;
+    const content = data?.choices?.[0]?.message?.content;
+    if (typeof content !== "string" || !content.trim()) return null;
+    return content.trim();
+  } catch (error) {
+    console.error("[tts-mimo] summarize failed:", error);
+    return null;
+  }
+}
+
 /**
  * 结构黑名单：检测“给人看而非给人听”的内容（代码块/命令输出/路径清单/表格）
  * 命中则阻止 TTS 朗读。全部纯正则/行扫描，零网络/LLM 调用。
@@ -384,6 +444,7 @@ export default function (pi: ExtensionAPI) {
         `选择音色: ${currentVoice?.name} (${currentVoice?.gender}, ${currentVoice?.lang})`,
         `设置风格: ${state.style}`,
         `内容过滤: ${state.filterEnabled ? "已开启 ✓" : "已关闭"}`,
+        `LLM 总结: ${state.summarizeEnabled ? "已开启 ✓" : "已关闭"}`,
       ];
       
       // 弹窗选择
@@ -416,6 +477,12 @@ export default function (pi: ExtensionAPI) {
           state.filterEnabled = !state.filterEnabled;
           saveState();
           ctx.ui.notify(`内容过滤 ${state.filterEnabled ? "已开启" : "已关闭"}`, "info");
+          break;
+
+        case 5: // LLM 总结开关
+          state.summarizeEnabled = !state.summarizeEnabled;
+          saveState();
+          ctx.ui.notify(`LLM 总结 ${state.summarizeEnabled ? "已开启" : "已关闭"}`, "info");
           break;
       }
     },
@@ -539,11 +606,23 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    // 超长时读最后 2000 字（结尾通常是对话总结，比开头更有价值）
-    const maxLength = 2000;
-    const speechText = text.length > maxLength
-      ? "……" + text.substring(text.length - maxLength)
-      : text;
+    // 长度处理：超过 summarizeThreshold 时用 LLM 总结成 1-3 句
+    let speechText: string;
+    if (text.length > state.summarizeThreshold) {
+      if (state.summarizeEnabled) {
+        const summary = await summarizeWithLLM(text);
+        if (summary) {
+          speechText = summary;
+        } else {
+          // LLM 失败降级：回到旧行为（读最后 2000 字，结尾通常是对话总结）
+          speechText = text.length > 2000 ? "……" + text.substring(text.length - 2000) : text;
+        }
+      } else {
+        speechText = text.length > 2000 ? "……" + text.substring(text.length - 2000) : text;
+      }
+    } else {
+      speechText = text;
+    }
 
     synthesizeSpeech(speechText).then((audio) => {
       if (audio) playAudio(audio);
