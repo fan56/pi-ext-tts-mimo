@@ -549,11 +549,18 @@ export default function (pi: ExtensionAPI) {
           break;
         }
 
-        case 7: { // 总结模型（循环切换）
+        case 7: { // 总结模型（二级弹窗选择）
           const summarizeModels = ["mimo-v2.5-pro", "qwen3.6-flash", "deepseek-v4-flash"];
-          state.summarizeModel = summarizeModels[(summarizeModels.indexOf(state.summarizeModel) + 1) % summarizeModels.length];
-          saveState();
-          ctx.ui.notify(`总结模型: ${state.summarizeModel}`, "info");
+          const summarizeModelOptions = summarizeModels.map((m) => `${m}${m === state.summarizeModel ? " ✓" : ""}`);
+          const chosen = await ctx.ui.select("选择总结模型:", summarizeModelOptions);
+          if (chosen) {
+            const idx = summarizeModelOptions.indexOf(chosen);
+            if (idx >= 0) {
+              state.summarizeModel = summarizeModels[idx];
+              saveState();
+              ctx.ui.notify(`总结模型: ${state.summarizeModel}`, "info");
+            }
+          }
           break;
         }
 
