@@ -128,3 +128,7 @@ bash generate-voice-previews.sh
 - Pi coding agent
 - macOS（使用 `afplay` 播放音频）
 - MiMo TTS API 访问权限
+
+## License
+
+[Apache-2.0](./LICENSE)

@@ -1,0 +1,42 @@
+# Minimal smoke CI for a plain-script pi extension: this repo has no
+# package.json, no build and no tests — the host loads index.ts directly from
+# the extensions directory. Typechecking against the live pi SDK is noisy
+# (host types drift daily), so the gate here is deliberately narrow:
+#
+#   1. esbuild transpiles index.ts (parse/type-stripping only, no module
+#      resolution) — catches syntax errors and non-erasable TS syntax.
+#   2. bash -n parses generate-voice-previews.sh.
+#
+# Verified locally: a healthy index.ts passes; a file with a syntax error
+# fails esbuild with a non-zero exit.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Syntax smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Parse index.ts (esbuild transpile, no module resolution)
+        run: npx --yes esbuild index.ts --outfile=/dev/null
+
+      - name: Parse generate-voice-previews.sh
+        run: bash -n generate-voice-previews.sh
